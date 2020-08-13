@@ -170,16 +170,44 @@ __asm__("str %%ax\n\t" \
  * This also clears the TS-flag if the task we switched to has used
  * tha math co-processor latest.
  */
+ //部分语法解释
+ /*这段是c语言中使用内联汇编模板，具体使用，请google GCC 内联汇编
+  *gcc采用AT&T风格的汇编语法，与x86汇编不同。两者差别，google搜查两者区别
+  * AT&T风格的汇编语法参考：https://www.cnblogs.com/sky-heaven/p/7561625.html
+  */
+  /*
+  （1）je跳转指令
+  je   1f或者je	1b	 是跳转到对应的标号的地方 
+  
+  这里的1表示标号(label),f和b表示向前还是向后,f(forward）向前，b(backward)向后 
+  
+  1行	 1: 	cmp   $0,	(%si)	
+  2行			 je   1f			   ///////跳转到后面的1标示的地方，也就是第6行 
+  3行			   movsb   
+  4行			 stosb	 
+  5行			 jmp   1b			  ////////跳转到前面1表示的地方	，也就是第1行 
+  6行	 1: 	jmp   1b			 ////////跳转到前面1表示的地方，第6行，其实就是个死循环
+  （2）cmpl 和movw
+    mov %eax,%ebx
+    AT&T汇编中，左边的是源寄存器，右边的是目的寄存器，在上边那个例子中，%eax是源寄存器，%ebx是目的寄存器
+    b(byte):8位， w（word）：16位， l（long）：32位
+   如：  movb %al,%bl     movw %ax,%bx     movl %eax,%ebx
+   (3)xchgl指令
+   寄存器和内存变量之间内容的交换指令，两个操作数的数据类型要相同，可以是一个字节，也可以四一个字，也可以是双字
+  （4）ljmp
+  长转移指令的功能是：把指令码中的目标地址装入程序计数器，使机器执行下一条指令时无条件转移到目标地址处执行程序，不影响任何标志
+  
+  */
 #define switch_to(n) {\
 struct {long a,b;} __tmp; \
-__asm__("cmpl %%ecx,current\n\t" \
-	"je 1f\n\t" \
-	"movw %%dx,%1\n\t" \
-	"xchgl %%ecx,current\n\t" \
-	"ljmp *%0\n\t" \
-	"cmpl %%ecx,last_task_used_math\n\t" \
-	"jne 1f\n\t" \
-	"clts\n" \
+__asm__("cmpl %%ecx,current\n\t" \    //比较ecx寄存器的值（task[n]）是否与指针current的值相等
+	"je 1f\n\t" \                     //je指令表示相等则跳转到下面的1标号
+	"movw %%dx,%1\n\t" \              //把dx寄存器的值（_TSS(n)）保存到__tmp.b
+	"xchgl %%ecx,current\n\t" \       //交互ecx寄存器与指针current的值，执行后的结果就是current = task[n]
+	"ljmp *%0\n\t" \                  //执行长跳转指令ljmp,让程序计数器跳转到地址为&__tmp.a处执行
+	"cmpl %%ecx,last_task_used_math\n\t" \    //判断原来的任务是否使用过协处理器任务
+	"jne 1f\n\t" \                            //没有使用则跳转到下面的标号
+	"clts\n" \                                //有使用则清掉cr0的的任务切换标志位TS
 	"1:" \
 	::"m" (*&__tmp.a),"m" (*&__tmp.b), \
 	"d" (_TSS(n)),"c" ((long) task[n])); \
