@@ -92,20 +92,67 @@ static unsigned char mem_map [ PAGING_PAGES ] = {0,};
 // 并没有映射到某个进程的地址空间中去。后面的put_page()函数即用于把指定页面映射
 // 到某个进程地址空间中。当然对于内核使用本函数并不需要再使用put_page()进行映射，
 // 因为内核代码和数据空间（16MB）已经对等地映射到物理地址空间。
+/*
+my note：参考https://blog.csdn.net/linpeng12358/article/details/41017961
+1.函数目的：
+    反向寻找mem_map[0..(PAGING_PAGES-1)]中的空闲项，即mem_map[i]==0的项，如果找到，
+    就返回物理地址，找不到返回.
+2.register unsigned long __res asm("ax");
+    __res是寄存器级变量，值保存在ax寄存器中,就是说对__res的操作等于ax寄存器的操作，为效率考虑
+3.__asm__("std ; repne ; scasb\n\t"
+
+    循环比较，找出mem_map[i]==0的页;
+    std设置DF=1，所以scasb执行递减操作，涉及寄存器al, ecx, es:(e)di三个寄存器，在函数尾部的定义中
+    :"0" (0),"i" (LOW_MEM),"c" (PAGING_PAGES),
+    "D" (mem_map+PAGING_PAGES-1)
+    :"di","cx","dx");
+    即有
+    al       = 0;    //如果mem_map[i] == 0,表示为空闲页，否则为已分配占用,al保存0值，用于比较
+
+    ecx    = PAGING_PAGES;                                 //主内存叶表个数
+
+    es:di =  (mem_map+PAGING_PAGES-1);   //内存管理数组最后一项
+    这句指令的意思是从数组mem_map[0..(PAGING_PAGES-1)]的最后一项
+    mem_map[PAGING_PAGES-1]开始，比较mem_map[i]是否等于0(0值保存在al寄存器中);
+    每比较一次,es:di值减1,如果不相等,es:di值减1,即mem_map[i--],继续比较,直到ecx == 0;
+    如果相等，则跳出循环
+ 类似C语言实现如下：
+  index_ = 0;
+ 
+    for (i = PAGING_PAGES-1; i != 0; i--)
+    {
+        if(0 != mem_map[i]) {
+            continue;   //继续循环
+        }
+        else {
+            index_ = i; //跳出循环
+            break;
+        }
+    }
+    
+    if(0 == index_) {
+      goto Label_1;
+    }
+ 
+    Label_1:
+           return index_;
+
+
+*/
 unsigned long get_free_page(void)
 {
 register unsigned long __res asm("ax");
 
-__asm__("std ; repne ; scasb\n\t"   // 置方向位，al(0)与对应每个页面的(di)内容比较
-	"jne 1f\n\t"                    // 如果没有等于0的字节，则跳转结束(返回0).
-	"movb $1,1(%%edi)\n\t"          // 1 => [1+edi],将对应页面内存映像bit位置1.
-	"sall $12,%%ecx\n\t"            // 页面数*4k = 相对页面其实地址
-	"addl %2,%%ecx\n\t"             // 再加上低端内存地址，得页面实际物理起始地址
-	"movl %%ecx,%%edx\n\t"          // 将页面实际其实地址->edx寄存器。
-	"movl $1024,%%ecx\n\t"          // 寄存器ecx置计数值1024
-	"leal 4092(%%edx),%%edi\n\t"    // 将4092+edx的位置->dei（该页面的末端地址）
-	"rep ; stosl\n\t"               // 将edi所指内存清零(反方向，即将该页面清零)
-	"movl %%edx,%%eax\n"            // 将页面起始地址->eax（返回值）
+__asm__("std ; repne ; scasb\n\t"   
+	"jne 1f\n\t"                            // 如果mem_map[0..(PAGING_PAGES-1)]均不等于0,跳转到标签1f处执行                   
+	"movb $1,1(%%edi)\n\t"                  //mem_map[i]==0是mem_map[0..(PAGING_PAGES-1)]中逆序第一个找到的等于0的目标, 将edi的最低位置1，即mem_map[i]=1,标志为该页已被占用，不是空闲位     
+	"sall $12,%%ecx\n\t"                    // 此时ecx保存的是mem_map[i]的下标i,即相对页面数,假设mem_map[0..(PAGING_PAGES-1)]最后一个参数, mem_map[PAGING_PAGES-1] == 0，即i == (PAGING_PAGES-1),所以此时*ecx == PAGING_PAGES-1,4k*(PAGING_PAGES-1),得到物理页面的物理基地址         
+	"addl %2,%%ecx\n\t"                     //加上低端内存地址1M，即1M+i*4k得到实际物理页面的基地址
+	"movl %%ecx,%%edx\n\t"                  //edx=物理页面的基地址
+	"movl $1024,%%ecx\n\t"         
+	"leal 4092(%%edx),%%edi\n\t"     //移动到物理页面末端
+	"rep ; stosl\n\t"                //反向清零物理页面   
+	"movl %%edx,%%eax\n"            //把物理页面的基地址赋值给eax寄存器，也就是给__res赋值
 	"1:"
 	:"=a" (__res)
 	:"0" (0),"i" (LOW_MEM),"c" (PAGING_PAGES),
